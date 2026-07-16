@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
@@ -25,9 +26,9 @@
  * 使用前設定：把下面 API_URL 換成你部署好的 GAS 網頁應用程式網址
  * (Deploy > 新增部署作業 > 網頁應用程式 之後複製 /exec 結尾的網址)
  * ===================================================================== */
-const API_URL = 'https://script.google.com/macros/s/AKfycbxHyGQfTy3b8KYILMGl9o4XvpYeloq0FnTIGdCv0SduRBeEZxQjeeLj6WTTyRiIrJZ0gA/exec';
+const API_URL = 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
 
-const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount } = Vue;
+const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
 
 const STATUS_NOT_ORDERED = '未叫貨';
 const STATUS_ORDERED = '已叫貨';
@@ -35,9 +36,9 @@ const STATUS_NO_ORDER_TODAY = '今日不叫貨';
 const STATUS_CYCLE = [STATUS_NOT_ORDERED, STATUS_ORDERED, STATUS_NO_ORDER_TODAY];
 
 const STATUS_STYLE = {
-  [STATUS_NOT_ORDERED]:   { bg: 'bg-red-50',    border: 'border-red-300',    dot: 'bg-red-500',    text: 'text-red-700',    label: '未叫貨' },
-  [STATUS_ORDERED]:       { bg: 'bg-green-50',  border: 'border-green-300',  dot: 'bg-green-500',  text: 'text-green-700',  label: '已叫貨' },
-  [STATUS_NO_ORDER_TODAY]:{ bg: 'bg-slate-100', border: 'border-slate-300', dot: 'bg-slate-400',   text: 'text-slate-600',  label: '今日不叫貨' },
+  [STATUS_NOT_ORDERED]:    { bg: 'bg-red-50',    border: 'border-red-300',   dot: 'bg-red-500',   text: 'text-red-700',   badge: 'bg-red-100 text-red-700',     label: '未叫貨', short: '未叫' },
+  [STATUS_ORDERED]:        { bg: 'bg-green-50',  border: 'border-green-300', dot: 'bg-green-500', text: 'text-green-700', badge: 'bg-green-100 text-green-700', label: '已叫貨', short: '已叫' },
+  [STATUS_NO_ORDER_TODAY]: { bg: 'bg-slate-100', border: 'border-slate-300', dot: 'bg-slate-400', text: 'text-slate-600', badge: 'bg-slate-200 text-slate-600',  label: '今日不叫貨', short: '不叫' },
 };
 
 function nextStatus(cur) {
@@ -66,10 +67,13 @@ const App = {
   setup() {
     const loading = ref(true);
     const initError = ref('');
+    const currentPage = ref('daily'); // 'daily' | 'dashboard'
+
     const customers = ref([]);
     const todayStatus = ref({});
     const countLast6 = ref({});
     const chainGroups = ref([]);
+    const responsiblePersons = ref([]);
     const historyByDate = ref({});
     const last6Dates = ref([]);
     const today = ref('');
@@ -77,22 +81,23 @@ const App = {
     const toasts = ref([]);
     let toastId = 0;
 
+    // 頁面 A 篩選器
     const searchQuery = ref('');
     const filterChain = ref('');
-    const filterStatus = ref('');
-    const showManagePanel = ref(false);
+    const filterResponsible = ref('');
+
+    // 管理區欄位
     const newChainName = ref('');
     const newCustomerName = ref('');
     const newCustomerChain = ref('');
+    const newCustomerResponsible = ref('');
     const savingChain = ref(false);
     const savingCustomer = ref(false);
 
     function showToast(msg, type) {
       const id = ++toastId;
       toasts.value.push({ id, msg, type: type || 'info' });
-      setTimeout(() => {
-        toasts.value = toasts.value.filter(t => t.id !== id);
-      }, 3000);
+      setTimeout(() => { toasts.value = toasts.value.filter(t => t.id !== id); }, 3000);
     }
 
     async function loadData(silent) {
@@ -109,6 +114,7 @@ const App = {
         todayStatus.value = merged;
         countLast6.value = res.countLast6;
         chainGroups.value = res.chainGroups;
+        responsiblePersons.value = res.responsiblePersons || [];
         historyByDate.value = res.historyByDate;
         last6Dates.value = res.last6Dates;
         today.value = res.today;
@@ -125,10 +131,7 @@ const App = {
       return customers.value.filter(c => {
         if (searchQuery.value && c.name.indexOf(searchQuery.value) === -1) return false;
         if (filterChain.value && c.chainGroup !== filterChain.value) return false;
-        if (filterStatus.value) {
-          const st = todayStatus.value[c.id] || STATUS_NOT_ORDERED;
-          if (st !== filterStatus.value) return false;
-        }
+        if (filterResponsible.value && c.responsiblePerson !== filterResponsible.value) return false;
         return true;
       });
     });
@@ -153,11 +156,21 @@ const App = {
         const st = todayStatus.value[c.id] || STATUS_NOT_ORDERED;
         if (st === STATUS_ORDERED) map[c.chainGroup].ordered++;
       });
-      // 確保沒有客戶的連鎖群組也會顯示 (total=0)
-      chainGroups.value.forEach(name => {
-        if (!map[name]) map[name] = { name, total: 0, ordered: 0 };
-      });
+      chainGroups.value.forEach(name => { if (!map[name]) map[name] = { name, total: 0, ordered: 0 }; });
       return Object.values(map);
+    });
+
+    // 負責人業績統計：各負責人名下客戶今日已叫貨比例
+    const responsibleStats = computed(() => {
+      const map = {};
+      customers.value.forEach(c => {
+        if (!c.responsiblePerson) return;
+        if (!map[c.responsiblePerson]) map[c.responsiblePerson] = { name: c.responsiblePerson, total: 0, ordered: 0 };
+        map[c.responsiblePerson].total++;
+        const st = todayStatus.value[c.id] || STATUS_NOT_ORDERED;
+        if (st === STATUS_ORDERED) map[c.responsiblePerson].ordered++;
+      });
+      return Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
     });
 
     const historyRows = computed(() => {
@@ -169,13 +182,9 @@ const App = {
       }));
     });
 
-    function statusOf(c) {
-      return todayStatus.value[c.id] || STATUS_NOT_ORDERED;
-    }
-
-    function styleOf(c) {
-      return STATUS_STYLE[statusOf(c)];
-    }
+    function statusOf(c) { return todayStatus.value[c.id] || STATUS_NOT_ORDERED; }
+    function styleOf(c) { return STATUS_STYLE[statusOf(c)]; }
+    function subLabel(c) { return [c.chainGroup, c.responsiblePerson].filter(Boolean).join(' · '); }
 
     async function cycleCard(c) {
       if (syncingIds.value.has(c.id)) return; // 防止寫入未完成時重複點擊
@@ -190,7 +199,6 @@ const App = {
       try {
         const res = await apiPost('updateStatus', { customerId: c.id, date: today.value, status: next });
         if (!res.ok) throw new Error(res.error || '更新失敗');
-        // 今天必定落在近 6 天範圍內，即時調整次數統計
         let delta = 0;
         if (prev === STATUS_ORDERED && next !== STATUS_ORDERED) delta = -1;
         if (prev !== STATUS_ORDERED && next === STATUS_ORDERED) delta = 1;
@@ -230,12 +238,23 @@ const App = {
       if (!name) return;
       savingCustomer.value = true;
       try {
-        const res = await apiPost('addCustomer', { name, chainGroup: newCustomerChain.value });
+        const res = await apiPost('addCustomer', {
+          name,
+          chainGroup: newCustomerChain.value,
+          responsiblePerson: newCustomerResponsible.value.trim()
+        });
         if (!res.ok) throw new Error(res.error || '新增失敗');
-        customers.value = customers.value.concat([{ id: res.id, name: res.name, chainGroup: res.chainGroup, phone: '', notes: '' }]);
+        customers.value = customers.value.concat([{
+          id: res.id, name: res.name, chainGroup: res.chainGroup,
+          responsiblePerson: res.responsiblePerson, phone: '', notes: ''
+        }]);
         countLast6.value = Object.assign({}, countLast6.value, { [res.id]: 0 });
+        if (res.responsiblePerson && responsiblePersons.value.indexOf(res.responsiblePerson) === -1) {
+          responsiblePersons.value = responsiblePersons.value.concat([res.responsiblePerson]).sort();
+        }
         newCustomerName.value = '';
         newCustomerChain.value = '';
+        newCustomerResponsible.value = '';
         showToast('已新增客戶：' + name, 'success');
       } catch (err) {
         showToast('新增客戶失敗: ' + err.message, 'error');
@@ -250,10 +269,26 @@ const App = {
       try {
         const res = await apiPost('assignChainGroup', { customerId: c.id, chainGroup });
         if (!res.ok) throw new Error(res.error || '更新失敗');
-        showToast(c.name + ' 已歸類至「' + (chainGroup || '無') + '」', 'success');
+        showToast(c.name + ' 已歸類至連鎖「' + (chainGroup || '無') + '」', 'success');
       } catch (err) {
         c.chainGroup = prevChain;
         showToast('歸類失敗: ' + err.message, 'error');
+      }
+    }
+
+    async function assignResponsible(c, responsiblePerson) {
+      const prev = c.responsiblePerson;
+      c.responsiblePerson = responsiblePerson; // 樂觀更新
+      try {
+        const res = await apiPost('assignResponsiblePerson', { customerId: c.id, responsiblePerson });
+        if (!res.ok) throw new Error(res.error || '更新失敗');
+        if (responsiblePerson && responsiblePersons.value.indexOf(responsiblePerson) === -1) {
+          responsiblePersons.value = responsiblePersons.value.concat([responsiblePerson]).sort();
+        }
+        showToast(c.name + ' 已指派給「' + (responsiblePerson || '無') + '」', 'success');
+      } catch (err) {
+        c.responsiblePerson = prev;
+        showToast('指派失敗: ' + err.message, 'error');
       }
     }
 
@@ -265,11 +300,12 @@ const App = {
     onBeforeUnmount(() => { if (pollTimer) clearInterval(pollTimer); });
 
     return {
-      loading, initError, customers, filteredCustomers, dashboardStats, chainStats, historyRows,
-      searchQuery, filterChain, filterStatus, chainGroups, syncingIds, toasts, countLast6,
-      showManagePanel, newChainName, newCustomerName, newCustomerChain, savingChain, savingCustomer,
-      statusOf, styleOf, cycleCard, addChainGroupSubmit, addCustomerSubmit, assignChain,
-      loadData, today, STATUS_NOT_ORDERED, STATUS_ORDERED, STATUS_NO_ORDER_TODAY
+      loading, initError, currentPage,
+      customers, filteredCustomers, dashboardStats, chainStats, responsibleStats, historyRows,
+      searchQuery, filterChain, filterResponsible, chainGroups, responsiblePersons, syncingIds, toasts, countLast6,
+      newChainName, newCustomerName, newCustomerChain, newCustomerResponsible, savingChain, savingCustomer,
+      statusOf, styleOf, subLabel, cycleCard, addChainGroupSubmit, addCustomerSubmit, assignChain, assignResponsible,
+      loadData, today
     };
   },
   template: `
@@ -292,179 +328,208 @@ const App = {
       <p class="text-slate-500 text-sm">讀取中，請稍候...</p>
     </div>
 
-    <!-- Header -->
+    <!-- Header + 雙頁面 Tab -->
     <header class="bg-gradient-to-r from-indigo-600 to-indigo-500 text-white sticky top-0 z-30 shadow-md">
-      <div class="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-3">
+      <div class="max-w-6xl mx-auto px-4 pt-4 flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 class="text-xl font-bold">客戶叫貨狀態管理</h1>
-          <p class="text-indigo-100 text-xs mt-0.5">{{ today }}・每 25 秒自動與 Google 試算表同步</p>
+          <p class="text-indigo-100 text-xs mt-0.5">{{ today }}・每 25 秒自動同步</p>
         </div>
-        <div class="flex items-center gap-2">
-          <button @click="loadData(false)" class="bg-white/15 hover:bg-white/25 text-white text-sm px-3 py-2 rounded-lg card-transition">
-            手動重新整理
-          </button>
-          <button @click="showManagePanel = true" class="bg-white text-indigo-600 font-medium text-sm px-3 py-2 rounded-lg hover:bg-indigo-50 card-transition">
-            管理 / 新增
-          </button>
-        </div>
+        <button @click="loadData(false)" class="bg-white/15 hover:bg-white/25 text-white text-sm px-3 py-2 rounded-lg card-transition">
+          手動重新整理
+        </button>
+      </div>
+      <div class="max-w-6xl mx-auto px-4 mt-3 flex gap-1">
+        <button @click="currentPage = 'daily'"
+                class="px-4 py-2 text-sm font-medium rounded-t-lg card-transition"
+                :class="currentPage === 'daily' ? 'bg-slate-100 text-indigo-700' : 'text-indigo-100 hover:bg-white/10'">
+          每日叫貨作業
+        </button>
+        <button @click="currentPage = 'dashboard'"
+                class="px-4 py-2 text-sm font-medium rounded-t-lg card-transition"
+                :class="currentPage === 'dashboard' ? 'bg-slate-100 text-indigo-700' : 'text-indigo-100 hover:bg-white/10'">
+          統計儀表板
+        </button>
       </div>
     </header>
 
-    <main class="max-w-6xl mx-auto px-4 mt-6 space-y-6">
+    <main class="max-w-6xl mx-auto px-4 mt-5 space-y-5">
 
       <div v-if="initError" class="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-3">
         連線失敗：{{ initError }}。請確認 API_URL 是否已設定為正確的 GAS 部署網址。
       </div>
 
-      <!-- Dashboard -->
-      <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <p class="text-slate-500 text-xs">今日已叫貨</p>
-          <p class="text-2xl font-black text-green-600 mt-1">{{ dashboardStats.ordered }}</p>
-        </div>
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <p class="text-slate-500 text-xs">今日未叫貨</p>
-          <p class="text-2xl font-black text-red-600 mt-1">{{ dashboardStats.notOrdered }}</p>
-        </div>
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <p class="text-slate-500 text-xs">今日不叫貨</p>
-          <p class="text-2xl font-black text-slate-500 mt-1">{{ dashboardStats.noOrderToday }}</p>
-        </div>
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-          <p class="text-slate-500 text-xs">客戶總數量</p>
-          <p class="text-2xl font-black text-indigo-600 mt-1">{{ dashboardStats.total }}</p>
-        </div>
-      </section>
+      <!-- ============ 頁面 A：每日叫貨作業 ============ -->
+      <div v-show="currentPage === 'daily'" class="space-y-4">
+        <section class="flex flex-wrap gap-2 items-center bg-white rounded-xl shadow-sm border border-slate-200 p-3">
+          <input v-model="searchQuery" type="text" placeholder="搜尋客戶名稱..."
+                 class="border border-slate-300 rounded-lg px-3 py-1.5 text-sm flex-1 min-w-[140px]" />
+          <select v-model="filterResponsible" class="border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">全部負責人</option>
+            <option v-for="p in responsiblePersons" :key="p" :value="p">{{ p }}</option>
+          </select>
+          <select v-model="filterChain" class="border border-slate-300 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">全部連鎖群組</option>
+            <option v-for="g in chainGroups" :key="g" :value="g">{{ g }}</option>
+          </select>
+          <span class="text-xs text-slate-400 ml-auto">顯示 {{ filteredCustomers.length }} / {{ customers.length }} 位客戶</span>
+        </section>
 
-      <!-- 連鎖店統計 -->
-      <section v-if="chainStats.length" class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-        <h2 class="font-bold text-slate-700 mb-3 text-sm">連鎖店家統計</h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-          <div v-for="g in chainStats" :key="g.name" class="border border-slate-200 rounded-lg p-3">
-            <p class="font-medium text-slate-700 text-sm">{{ g.name }}</p>
-            <p class="text-slate-500 text-xs mt-1">已叫貨 <span class="text-green-600 font-bold">{{ g.ordered }}</span> / 總共 <span class="font-bold">{{ g.total }}</span> 間</p>
-            <div class="w-full bg-slate-100 rounded-full h-2 mt-2">
-              <div class="bg-green-500 h-2 rounded-full" :style="{ width: (g.total ? (g.ordered / g.total * 100) : 0) + '%' }"></div>
+        <!-- 緊湊型客戶卡片：多欄小卡，點擊循環切換狀態 -->
+        <section class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2">
+          <div v-for="c in filteredCustomers" :key="c.id"
+               @click="cycleCard(c)"
+               class="relative rounded-lg border p-2 cursor-pointer select-none card-transition hover:shadow"
+               :class="[styleOf(c).bg, styleOf(c).border, syncingIds.has(c.id) ? 'opacity-60 pointer-events-none' : '']">
+            <div v-if="syncingIds.has(c.id)" class="absolute inset-0 bg-white/40 rounded-lg flex items-center justify-center">
+              <svg class="spin w-4 h-4 text-slate-500" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" opacity="0.25"/>
+                <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <div class="flex items-center justify-between gap-1">
+              <span class="text-xs font-bold text-slate-800 truncate">{{ c.name }}</span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium whitespace-nowrap" :class="styleOf(c).badge">{{ styleOf(c).short }}</span>
+            </div>
+            <div class="flex items-center justify-between mt-1 gap-1">
+              <span class="text-[10px] text-slate-400 truncate">{{ subLabel(c) || ' ' }}</span>
+              <span class="flex gap-0.5 shrink-0">
+                <span v-for="i in 6" :key="i" class="w-1.5 h-1.5 rounded-full"
+                      :class="i <= (countLast6[c.id] || 0) ? 'bg-emerald-500' : 'bg-slate-200'"></span>
+              </span>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <!-- 近 6 天歷史統計 -->
-      <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 overflow-x-auto">
-        <h2 class="font-bold text-slate-700 mb-3 text-sm">近 6 天歷史統計</h2>
-        <table class="w-full text-sm min-w-[480px]">
-          <thead>
-            <tr class="text-slate-500 text-xs border-b border-slate-200">
-              <th class="text-left py-2 font-medium">日期</th>
-              <th class="text-right py-2 font-medium text-green-600">已叫貨</th>
-              <th class="text-right py-2 font-medium text-red-600">未叫貨</th>
-              <th class="text-right py-2 font-medium text-slate-500">今日不叫貨</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in historyRows" :key="row.date" class="border-b border-slate-100 last:border-0">
-              <td class="py-2 text-slate-700">{{ row.date }}</td>
-              <td class="py-2 text-right text-green-600 font-semibold">{{ row.ordered }}</td>
-              <td class="py-2 text-right text-red-600 font-semibold">{{ row.notOrdered }}</td>
-              <td class="py-2 text-right text-slate-500 font-semibold">{{ row.noOrderToday }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
+        <p v-if="!loading && filteredCustomers.length === 0" class="text-center text-slate-400 text-sm py-10">
+          沒有符合條件的客戶
+        </p>
+      </div>
 
-      <!-- 篩選列 -->
-      <section class="flex flex-wrap gap-2 items-center">
-        <input v-model="searchQuery" type="text" placeholder="搜尋客戶名稱..."
-               class="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px]" />
-        <select v-model="filterChain" class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
-          <option value="">全部連鎖群組</option>
-          <option v-for="g in chainGroups" :key="g" :value="g">{{ g }}</option>
-        </select>
-        <select v-model="filterStatus" class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
-          <option value="">全部狀態</option>
-          <option :value="STATUS_NOT_ORDERED">未叫貨</option>
-          <option :value="STATUS_ORDERED">已叫貨</option>
-          <option :value="STATUS_NO_ORDER_TODAY">今日不叫貨</option>
-        </select>
-      </section>
+      <!-- ============ 頁面 B：統計儀表板 ============ -->
+      <div v-show="currentPage === 'dashboard'" class="space-y-5">
 
-      <!-- 客戶卡片 -->
-      <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-        <div v-for="c in filteredCustomers" :key="c.id"
-             @click="cycleCard(c)"
-             class="relative rounded-xl border-2 p-4 cursor-pointer select-none card-transition hover:shadow-md"
-             :class="[styleOf(c).bg, styleOf(c).border, syncingIds.has(c.id) ? 'opacity-60 pointer-events-none' : '']">
-          <div v-if="syncingIds.has(c.id)" class="absolute inset-0 bg-white/40 rounded-xl flex items-center justify-center">
-            <svg class="spin w-6 h-6 text-slate-500" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" opacity="0.25"/>
-              <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-            </svg>
+        <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <p class="text-slate-500 text-xs">今日已叫貨</p>
+            <p class="text-2xl font-black text-green-600 mt-1">{{ dashboardStats.ordered }}</p>
           </div>
-          <div class="flex items-start justify-between gap-2">
-            <div>
-              <p class="font-bold text-slate-800">{{ c.name }}</p>
-              <p v-if="c.chainGroup" class="text-xs text-slate-400 mt-0.5">{{ c.chainGroup }}</p>
+          <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <p class="text-slate-500 text-xs">今日未叫貨</p>
+            <p class="text-2xl font-black text-red-600 mt-1">{{ dashboardStats.notOrdered }}</p>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <p class="text-slate-500 text-xs">今日不叫貨</p>
+            <p class="text-2xl font-black text-slate-500 mt-1">{{ dashboardStats.noOrderToday }}</p>
+          </div>
+          <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+            <p class="text-slate-500 text-xs">客戶總數量</p>
+            <p class="text-2xl font-black text-indigo-600 mt-1">{{ dashboardStats.total }}</p>
+          </div>
+        </section>
+
+        <section v-if="chainStats.length" class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+          <h2 class="font-bold text-slate-700 mb-3 text-sm">連鎖店家統計</h2>
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+            <div v-for="g in chainStats" :key="g.name" class="border border-slate-200 rounded-lg p-3">
+              <p class="font-medium text-slate-700 text-sm">{{ g.name }}</p>
+              <p class="text-slate-500 text-xs mt-1">已叫貨 <span class="text-green-600 font-bold">{{ g.ordered }}</span> / 總共 <span class="font-bold">{{ g.total }}</span> 間</p>
+              <div class="w-full bg-slate-100 rounded-full h-2 mt-2">
+                <div class="bg-green-500 h-2 rounded-full" :style="{ width: (g.total ? (g.ordered / g.total * 100) : 0) + '%' }"></div>
+              </div>
             </div>
-            <span class="w-3 h-3 rounded-full mt-1" :class="styleOf(c).dot"></span>
           </div>
-          <p class="mt-3 text-sm font-semibold" :class="styleOf(c).text">{{ styleOf(c).label }}</p>
-          <p class="text-xs text-slate-400 mt-1">近 6 天叫貨 <span class="font-semibold text-slate-500">{{ countLast6[c.id] || 0 }} / 6</span> 次</p>
-        </div>
-      </section>
+        </section>
 
-      <p v-if="!loading && filteredCustomers.length === 0" class="text-center text-slate-400 text-sm py-10">
-        沒有符合條件的客戶
-      </p>
-    </main>
-
-    <!-- 管理面板 -->
-    <div v-if="showManagePanel" class="fixed inset-0 bg-black/40 z-40 flex justify-end" @click.self="showManagePanel = false">
-      <div class="bg-white w-full max-w-md h-full overflow-y-auto shadow-2xl p-5 space-y-6">
-        <div class="flex items-center justify-between">
-          <h2 class="font-bold text-lg text-slate-800">管理 / 新增</h2>
-          <button @click="showManagePanel = false" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
-        </div>
-
-        <div>
-          <h3 class="font-semibold text-slate-700 text-sm mb-2">新增連鎖群組</h3>
-          <div class="flex gap-2">
-            <input v-model="newChainName" type="text" placeholder="例如：連鎖A"
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1" />
-            <button @click="addChainGroupSubmit" :disabled="savingChain"
-                    class="bg-indigo-600 text-white text-sm px-4 py-2 rounded-lg disabled:opacity-50">新增</button>
+        <section v-if="responsibleStats.length" class="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+          <h2 class="font-bold text-slate-700 mb-3 text-sm">負責人業績統計</h2>
+          <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+            <div v-for="p in responsibleStats" :key="p.name" class="border border-slate-200 rounded-lg p-3">
+              <p class="font-medium text-slate-700 text-sm">{{ p.name }}</p>
+              <p class="text-slate-500 text-xs mt-1">已叫貨 <span class="text-green-600 font-bold">{{ p.ordered }}</span> / {{ p.total }} 間</p>
+              <div class="w-full bg-slate-100 rounded-full h-2 mt-2">
+                <div class="bg-indigo-500 h-2 rounded-full" :style="{ width: (p.total ? (p.ordered / p.total * 100) : 0) + '%' }"></div>
+              </div>
+            </div>
           </div>
-        </div>
+        </section>
 
-        <div>
-          <h3 class="font-semibold text-slate-700 text-sm mb-2">新增客戶</h3>
-          <div class="space-y-2">
-            <input v-model="newCustomerName" type="text" placeholder="客戶名稱"
-                   class="border border-slate-300 rounded-lg px-3 py-2 text-sm w-full" />
-            <select v-model="newCustomerChain" class="border border-slate-300 rounded-lg px-3 py-2 text-sm w-full">
-              <option value="">不歸類連鎖群組</option>
-              <option v-for="g in chainGroups" :key="g" :value="g">{{ g }}</option>
-            </select>
-            <button @click="addCustomerSubmit" :disabled="savingCustomer"
-                    class="bg-indigo-600 text-white text-sm px-4 py-2 rounded-lg w-full disabled:opacity-50">新增客戶</button>
+        <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 overflow-x-auto">
+          <h2 class="font-bold text-slate-700 mb-3 text-sm">近 6 天歷史統計</h2>
+          <table class="w-full text-sm min-w-[480px]">
+            <thead>
+              <tr class="text-slate-500 text-xs border-b border-slate-200">
+                <th class="text-left py-2 font-medium">日期</th>
+                <th class="text-right py-2 font-medium text-green-600">已叫貨</th>
+                <th class="text-right py-2 font-medium text-red-600">未叫貨</th>
+                <th class="text-right py-2 font-medium text-slate-500">今日不叫貨</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in historyRows" :key="row.date" class="border-b border-slate-100 last:border-0">
+                <td class="py-2 text-slate-700">{{ row.date }}</td>
+                <td class="py-2 text-right text-green-600 font-semibold">{{ row.ordered }}</td>
+                <td class="py-2 text-right text-red-600 font-semibold">{{ row.notOrdered }}</td>
+                <td class="py-2 text-right text-slate-500 font-semibold">{{ row.noOrderToday }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- 管理介面：新增連鎖店家 / 新增客戶 / 動態歸類客戶 -->
+        <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 space-y-5">
+          <h2 class="font-bold text-slate-700 text-sm">管理設定</h2>
+
+          <div>
+            <h3 class="font-semibold text-slate-600 text-xs mb-2">新增連鎖群組</h3>
+            <div class="flex gap-2">
+              <input v-model="newChainName" type="text" placeholder="例如：連鎖A"
+                     class="border border-slate-300 rounded-lg px-3 py-2 text-sm flex-1" />
+              <button @click="addChainGroupSubmit" :disabled="savingChain"
+                      class="bg-indigo-600 text-white text-sm px-4 py-2 rounded-lg disabled:opacity-50">新增</button>
+            </div>
           </div>
-        </div>
 
-        <div>
-          <h3 class="font-semibold text-slate-700 text-sm mb-2">客戶連鎖群組歸類</h3>
-          <div class="space-y-2 max-h-96 overflow-y-auto">
-            <div v-for="c in customers" :key="c.id" class="flex items-center justify-between gap-2 border border-slate-200 rounded-lg px-3 py-2">
-              <span class="text-sm text-slate-700">{{ c.name }}</span>
-              <select :value="c.chainGroup" @change="assignChain(c, $event.target.value)"
-                      class="border border-slate-300 rounded-lg px-2 py-1 text-xs">
-                <option value="">無</option>
+          <div>
+            <h3 class="font-semibold text-slate-600 text-xs mb-2">新增客戶</h3>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input v-model="newCustomerName" type="text" placeholder="客戶名稱"
+                     class="border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+              <select v-model="newCustomerChain" class="border border-slate-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">不歸類連鎖群組</option>
                 <option v-for="g in chainGroups" :key="g" :value="g">{{ g }}</option>
               </select>
+              <input v-model="newCustomerResponsible" list="responsibleList" type="text" placeholder="負責人（可自訂）"
+                     class="border border-slate-300 rounded-lg px-3 py-2 text-sm" />
+            </div>
+            <button @click="addCustomerSubmit" :disabled="savingCustomer"
+                    class="mt-2 bg-indigo-600 text-white text-sm px-4 py-2 rounded-lg w-full sm:w-auto disabled:opacity-50">新增客戶</button>
+          </div>
+
+          <div>
+            <h3 class="font-semibold text-slate-600 text-xs mb-2">客戶歸類（連鎖群組 / 負責人）</h3>
+            <div class="space-y-2 max-h-96 overflow-y-auto">
+              <div v-for="c in customers" :key="c.id" class="grid grid-cols-1 sm:grid-cols-3 gap-2 items-center border border-slate-200 rounded-lg px-3 py-2">
+                <span class="text-sm text-slate-700 truncate">{{ c.name }}</span>
+                <select :value="c.chainGroup" @change="assignChain(c, $event.target.value)"
+                        class="border border-slate-300 rounded-lg px-2 py-1 text-xs">
+                  <option value="">無連鎖</option>
+                  <option v-for="g in chainGroups" :key="g" :value="g">{{ g }}</option>
+                </select>
+                <input :value="c.responsiblePerson" list="responsibleList"
+                       @change="assignResponsible(c, $event.target.value)"
+                       type="text" placeholder="負責人"
+                       class="border border-slate-300 rounded-lg px-2 py-1 text-xs" />
+              </div>
             </div>
           </div>
-        </div>
+
+          <datalist id="responsibleList">
+            <option v-for="p in responsiblePersons" :key="p" :value="p"></option>
+          </datalist>
+        </section>
       </div>
-    </div>
+    </main>
   </div>
   `
 };
