@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
@@ -7,6 +6,7 @@
 <title>客戶叫貨狀態管理系統</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
 <style>
@@ -26,7 +26,7 @@
  * 使用前設定：把下面 API_URL 換成你部署好的 GAS 網頁應用程式網址
  * (Deploy > 新增部署作業 > 網頁應用程式 之後複製 /exec 結尾的網址)
  * ===================================================================== */
-const API_URL = 'https://script.google.com/macros/s/AKfycbxHyGQfTy3b8KYILMGl9o4XvpYeloq0FnTIGdCv0SduRBeEZxQjeeLj6WTTyRiIrJZ0gA/exec';
+const API_URL = 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
 
 const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
 
@@ -93,6 +93,16 @@ const App = {
     const newCustomerResponsible = ref('');
     const savingChain = ref(false);
     const savingCustomer = ref(false);
+
+    // 頁面 C：Excel 匯入
+    const workbook = ref(null);
+    const excelSheetNames = ref([]);
+    const selectedSheet = ref('');
+    const dateCols = ref([]);            // [{ colIndex, header, date }]
+    const unparsedDateHeaders = ref([]); // 無法辨識為日期的欄名
+    const previewRows = ref([]);         // [{ rawName, customer, marks: { 'yyyy-MM-dd': bool } }]
+    const importing = ref(false);
+    const importSummary = ref(null);
 
     function showToast(msg, type) {
       const id = ++toastId;
@@ -292,6 +302,146 @@ const App = {
       }
     }
 
+    // ============ Excel 匯入邏輯 ============
+    function pad2(n) { n = String(n); return n.length < 2 ? '0' + n : n; }
+
+    function normalizeName(s) {
+      return String(s || '').replace(/\s+/g, '').trim();
+    }
+
+    // 盡量把標題列的儲存格內容解析成 yyyy-MM-dd；無法辨識回傳 null
+    function parseDateFlexible(raw) {
+      if (raw === null || raw === undefined || raw === '') return null;
+      const s = String(raw).trim();
+      let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
+      if (m) return m[1] + '-' + pad2(m[2]) + '-' + pad2(m[3]);
+      m = s.match(/^(\d{1,2})[-\/](\d{1,2})$/); // 只有月/日，沒有年份 -> 沿用「今天」所在的年份
+      if (m) {
+        const y = (today.value || String(new Date().getFullYear())).slice(0, 4);
+        return y + '-' + pad2(m[1]) + '-' + pad2(m[2]);
+      }
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) {
+        return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+      }
+      return null;
+    }
+
+    function findMatchedCustomer(rawName) {
+      const norm = normalizeName(rawName);
+      if (!norm) return null;
+      let hit = customers.value.find(c => normalizeName(c.name) === norm);
+      if (hit) return hit;
+      // 找不到精準相符，退而求其次做包含比對
+      hit = customers.value.find(c => {
+        const cn = normalizeName(c.name);
+        return cn && (cn.indexOf(norm) !== -1 || norm.indexOf(cn) !== -1);
+      });
+      return hit || null;
+    }
+
+    function resetImportState() {
+      dateCols.value = [];
+      unparsedDateHeaders.value = [];
+      previewRows.value = [];
+      importSummary.value = null;
+    }
+
+    function handleFileChange(e) {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      resetImportState();
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        try {
+          const data = new Uint8Array(evt.target.result);
+          const wb = XLSX.read(data, { type: 'array', cellDates: true });
+          workbook.value = wb;
+          excelSheetNames.value = wb.SheetNames;
+          selectedSheet.value = wb.SheetNames[0];
+          parseSheet();
+        } catch (err) {
+          showToast('讀取 Excel 失敗: ' + err.message, 'error');
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function parseSheet() {
+      resetImportState();
+      if (!workbook.value || !selectedSheet.value) return;
+      const ws = workbook.value.Sheets[selectedSheet.value];
+      const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '', dateNF: 'yyyy-mm-dd' });
+      if (!matrix.length) { showToast('這個工作表是空的', 'error'); return; }
+
+      const headerRow = matrix[0].map(h => String(h == null ? '' : h).trim());
+      let nameColIndex = headerRow.findIndex(h => /客戶|名稱|姓名/.test(h));
+      if (nameColIndex === -1) nameColIndex = 0;
+
+      const cols = [];
+      const unparsed = [];
+      headerRow.forEach((h, idx) => {
+        if (idx === nameColIndex || !h) return;
+        const d = parseDateFlexible(h);
+        if (d) cols.push({ colIndex: idx, header: h, date: d });
+        else unparsed.push(h);
+      });
+      cols.sort((a, b) => a.date.localeCompare(b.date));
+      dateCols.value = cols;
+      unparsedDateHeaders.value = unparsed;
+
+      const rows = [];
+      for (let i = 1; i < matrix.length; i++) {
+        const row = matrix[i];
+        const rawName = String(row[nameColIndex] == null ? '' : row[nameColIndex]).trim();
+        if (!rawName) continue;
+        const customer = findMatchedCustomer(rawName);
+        const marks = {};
+        cols.forEach(dc => {
+          const val = row[dc.colIndex];
+          marks[dc.date] = !!(val !== null && val !== undefined && String(val).trim() !== '');
+        });
+        rows.push({ rawName, customer, marks });
+      }
+      previewRows.value = rows;
+    }
+
+    const matchedCount = computed(() => previewRows.value.filter(r => r.customer).length);
+    const unmatchedNames = computed(() => previewRows.value.filter(r => !r.customer).map(r => r.rawName));
+    const totalMarkCount = computed(() => {
+      let n = 0;
+      previewRows.value.forEach(r => {
+        if (!r.customer) return;
+        dateCols.value.forEach(dc => { if (r.marks[dc.date]) n++; });
+      });
+      return n;
+    });
+
+    async function confirmImport() {
+      const updates = [];
+      previewRows.value.forEach(r => {
+        if (!r.customer) return;
+        dateCols.value.forEach(dc => {
+          if (r.marks[dc.date]) updates.push({ customerId: r.customer.id, date: dc.date, status: STATUS_ORDERED });
+        });
+      });
+      if (!updates.length) { showToast('沒有可匯入的「已叫貨」標記', 'error'); return; }
+
+      importing.value = true;
+      importSummary.value = null;
+      try {
+        const res = await apiPost('batchUpdateStatus', { updates });
+        if (!res.ok) throw new Error(res.error || '匯入失敗');
+        importSummary.value = res;
+        showToast('匯入完成，共寫入 ' + res.total + ' 筆', 'success');
+        await loadData(true); // 重新整理儀表板與卡片資料
+      } catch (err) {
+        showToast('匯入失敗: ' + err.message, 'error');
+      } finally {
+        importing.value = false;
+      }
+    }
+
     let pollTimer = null;
     onMounted(() => {
       loadData(false);
@@ -305,7 +455,9 @@ const App = {
       searchQuery, filterChain, filterResponsible, chainGroups, responsiblePersons, syncingIds, toasts, countLast6,
       newChainName, newCustomerName, newCustomerChain, newCustomerResponsible, savingChain, savingCustomer,
       statusOf, styleOf, subLabel, cycleCard, addChainGroupSubmit, addCustomerSubmit, assignChain, assignResponsible,
-      loadData, today
+      loadData, today,
+      excelSheetNames, selectedSheet, dateCols, unparsedDateHeaders, previewRows, importing, importSummary,
+      handleFileChange, parseSheet, confirmImport, matchedCount, unmatchedNames, totalMarkCount
     };
   },
   template: `
@@ -350,6 +502,11 @@ const App = {
                 :class="currentPage === 'dashboard' ? 'bg-slate-100 text-indigo-700' : 'text-indigo-100 hover:bg-white/10'">
           統計儀表板
         </button>
+        <button @click="currentPage = 'import'"
+                class="px-4 py-2 text-sm font-medium rounded-t-lg card-transition"
+                :class="currentPage === 'import' ? 'bg-slate-100 text-indigo-700' : 'text-indigo-100 hover:bg-white/10'">
+          匯入 Excel
+        </button>
       </div>
     </header>
 
@@ -392,7 +549,7 @@ const App = {
               <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium whitespace-nowrap" :class="styleOf(c).badge">{{ styleOf(c).short }}</span>
             </div>
             <div class="flex items-center justify-between mt-1 gap-1">
-              <span class="text-[10px] text-slate-400 truncate">{{ subLabel(c) || ' ' }}</span>
+              <span class="text-[10px] text-slate-400 truncate">{{ subLabel(c) || ' ' }}</span>
               <span class="flex gap-0.5 shrink-0">
                 <span v-for="i in 6" :key="i" class="w-1.5 h-1.5 rounded-full"
                       :class="i <= (countLast6[c.id] || 0) ? 'bg-emerald-500' : 'bg-slate-200'"></span>
@@ -527,6 +684,80 @@ const App = {
           <datalist id="responsibleList">
             <option v-for="p in responsiblePersons" :key="p" :value="p"></option>
           </datalist>
+        </section>
+      </div>
+
+      <!-- ============ 頁面 C：匯入 Excel ============ -->
+      <div v-show="currentPage === 'import'" class="space-y-4">
+        <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 space-y-3">
+          <h2 class="font-bold text-slate-700 text-sm">匯入 Excel（客戶 x 日期矩陣）</h2>
+          <p class="text-xs text-slate-500 leading-relaxed">
+            檔案格式：第一列為標題列，其中一欄是客戶名稱（欄名建議含「客戶」或「名稱」），其餘每一欄代表一個日期（例如 2026/7/13 或 7/13）。
+            儲存格只要「不是空白」（例如填 V、✓、1 皆可）就會被視為當天已叫貨，空白儲存格則不會變動系統內原本的狀態。
+          </p>
+          <input type="file" accept=".xlsx,.xls" @change="handleFileChange"
+                 class="text-sm border border-slate-300 rounded-lg px-3 py-2 w-full" />
+
+          <div v-if="excelSheetNames.length > 1" class="flex items-center gap-2">
+            <span class="text-xs text-slate-500">工作表：</span>
+            <select v-model="selectedSheet" @change="parseSheet" class="border border-slate-300 rounded-lg px-2 py-1 text-sm">
+              <option v-for="s in excelSheetNames" :key="s" :value="s">{{ s }}</option>
+            </select>
+          </div>
+
+          <div v-if="unparsedDateHeaders.length" class="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-lg p-2">
+            以下欄位無法辨識為日期，已略過：{{ unparsedDateHeaders.join('、') }}
+          </div>
+        </section>
+
+        <section v-if="previewRows.length" class="bg-white rounded-xl shadow-sm border border-slate-200 p-4 space-y-3">
+          <div class="flex flex-wrap items-center gap-4 text-xs text-slate-600">
+            <span>辨識日期欄位 <b class="text-indigo-600">{{ dateCols.length }}</b> 個</span>
+            <span>比對到客戶 <b class="text-green-600">{{ matchedCount }}</b> / {{ previewRows.length }} 列</span>
+            <span>將寫入「已叫貨」標記 <b class="text-indigo-600">{{ totalMarkCount }}</b> 筆</span>
+          </div>
+
+          <div v-if="unmatchedNames.length" class="bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg p-2">
+            找不到對應客戶（系統中無此名稱，請確認拼字或先在「統計儀表板」新增客戶）：{{ unmatchedNames.join('、') }}
+          </div>
+
+          <div class="overflow-x-auto border border-slate-200 rounded-lg">
+            <table class="text-xs min-w-max">
+              <thead>
+                <tr class="bg-slate-50">
+                  <th class="sticky left-0 bg-slate-50 text-left px-2 py-2 font-medium text-slate-600 border-b border-slate-200 min-w-[120px]">客戶名稱</th>
+                  <th v-for="dc in dateCols" :key="dc.date" class="px-2 py-2 font-medium text-slate-600 border-b border-slate-200 text-center whitespace-nowrap" :title="dc.date">
+                    {{ dc.date.slice(5) }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in previewRows" :key="r.rawName" class="border-b border-slate-100 last:border-0" :class="!r.customer ? 'opacity-50' : ''">
+                  <td class="sticky left-0 bg-white px-2 py-1.5 font-medium text-slate-700 whitespace-nowrap">
+                    {{ r.rawName }}
+                    <span v-if="!r.customer" class="text-red-500 text-[10px] ml-1">(找不到)</span>
+                  </td>
+                  <td v-for="dc in dateCols" :key="dc.date" class="px-2 py-1.5 text-center">
+                    <span class="inline-flex items-center justify-center w-5 h-5 rounded border text-[10px] font-bold"
+                          :class="r.marks[dc.date] ? 'bg-green-500 border-green-500 text-white' : 'bg-slate-50 border-slate-200 text-transparent'">V</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <button @click="confirmImport" :disabled="importing || totalMarkCount === 0"
+                  class="bg-indigo-600 text-white text-sm px-5 py-2.5 rounded-lg disabled:opacity-50 flex items-center gap-2">
+            <svg v-if="importing" class="spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" opacity="0.25"/>
+              <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+            </svg>
+            {{ importing ? '匯入中...' : '確認匯入' }}
+          </button>
+
+          <div v-if="importSummary" class="bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg p-2">
+            匯入完成：更新 {{ importSummary.updated }} 筆、新增 {{ importSummary.appended }} 筆（共 {{ importSummary.total }} 筆）。
+          </div>
         </section>
       </div>
     </main>
