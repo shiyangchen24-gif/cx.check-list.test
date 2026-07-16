@@ -417,6 +417,33 @@ const App = {
       return n;
     });
 
+    // 依目前比對結果（包含找不到的客戶）產生一份 Excel 下載，方框對應位置以 "V" 表現
+    function exportPreviewExcel() {
+      if (!previewRows.value.length || !dateCols.value.length) {
+        showToast('尚無可匯出的比對結果，請先選擇檔案', 'error');
+        return;
+      }
+      const header = ['客戶名稱'].concat(dateCols.value.map(dc => dc.date));
+      const rows = previewRows.value.map(r => {
+        const nameCell = r.rawName + (r.customer ? '' : '（找不到對應客戶）');
+        const marks = dateCols.value.map(dc => (r.marks[dc.date] ? 'V' : ''));
+        return [nameCell].concat(marks);
+      });
+      const aoa = [header].concat(rows);
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [{ wch: 20 }].concat(dateCols.value.map(() => ({ wch: 10 })));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '叫貨比對結果');
+      const fileName = '叫貨比對結果_' + (today.value || todayFallback()) + '.xlsx';
+      XLSX.writeFile(wb, fileName);
+      showToast('已匯出 ' + fileName, 'success');
+    }
+
+    function todayFallback() {
+      const d = new Date();
+      return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+    }
+
     async function confirmImport() {
       const updates = [];
       previewRows.value.forEach(r => {
@@ -457,7 +484,7 @@ const App = {
       statusOf, styleOf, subLabel, cycleCard, addChainGroupSubmit, addCustomerSubmit, assignChain, assignResponsible,
       loadData, today,
       excelSheetNames, selectedSheet, dateCols, unparsedDateHeaders, previewRows, importing, importSummary,
-      handleFileChange, parseSheet, confirmImport, matchedCount, unmatchedNames, totalMarkCount
+      handleFileChange, parseSheet, confirmImport, matchedCount, unmatchedNames, totalMarkCount, exportPreviewExcel
     };
   },
   template: `
@@ -694,6 +721,7 @@ const App = {
           <p class="text-xs text-slate-500 leading-relaxed">
             檔案格式：第一列為標題列，其中一欄是客戶名稱（欄名建議含「客戶」或「名稱」），其餘每一欄代表一個日期（例如 2026/7/13 或 7/13）。
             儲存格只要「不是空白」（例如填 V、✓、1 皆可）就會被視為當天已叫貨，空白儲存格則不會變動系統內原本的狀態。
+            比對完成後，可以按「確認匯入」把結果寫進 Google 試算表，也可以按「匯出 Excel」下載一份比對結果檔案，找到的客戶與日期會在對應方框顯示「V」。
           </p>
           <input type="file" accept=".xlsx,.xls" @change="handleFileChange"
                  class="text-sm border border-slate-300 rounded-lg px-3 py-2 w-full" />
@@ -746,14 +774,20 @@ const App = {
             </table>
           </div>
 
-          <button @click="confirmImport" :disabled="importing || totalMarkCount === 0"
-                  class="bg-indigo-600 text-white text-sm px-5 py-2.5 rounded-lg disabled:opacity-50 flex items-center gap-2">
-            <svg v-if="importing" class="spin w-4 h-4" viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" opacity="0.25"/>
-              <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
-            </svg>
-            {{ importing ? '匯入中...' : '確認匯入' }}
-          </button>
+          <div class="flex flex-wrap gap-2">
+            <button @click="confirmImport" :disabled="importing || totalMarkCount === 0"
+                    class="bg-indigo-600 text-white text-sm px-5 py-2.5 rounded-lg disabled:opacity-50 flex items-center gap-2">
+              <svg v-if="importing" class="spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" opacity="0.25"/>
+                <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+              </svg>
+              {{ importing ? '匯入中...' : '確認匯入（寫入系統）' }}
+            </button>
+            <button @click="exportPreviewExcel"
+                    class="bg-white border border-slate-300 text-slate-700 text-sm px-5 py-2.5 rounded-lg hover:bg-slate-50">
+              匯出 Excel（方框顯示 V）
+            </button>
+          </div>
 
           <div v-if="importSummary" class="bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-lg p-2">
             匯入完成：更新 {{ importSummary.updated }} 筆、新增 {{ importSummary.appended }} 筆（共 {{ importSummary.total }} 筆）。
